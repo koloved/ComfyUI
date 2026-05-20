@@ -68,7 +68,8 @@ class MultiGPUOptionsNode(io.ComfyNode):
     def execute(cls, device_index: int, relative_speed: float, gpu_options: comfy.multigpu.GPUOptionsGroup = None) -> io.NodeOutput:
         if not gpu_options:
             gpu_options = comfy.multigpu.GPUOptionsGroup()
-        gpu_options.clone()
+        else:
+            gpu_options = gpu_options.clone()
 
         opt = comfy.multigpu.GPUOptions(device_index=device_index, relative_speed=relative_speed)
         gpu_options.add(opt)
