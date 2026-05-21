@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Iterable, Sequence
 
 import sqlalchemy as sa
@@ -20,7 +21,12 @@ from app.assets.database.queries.common import (
     build_visible_owner_clause,
     iter_row_chunks,
 )
-from app.assets.helpers import escape_sql_like_string, get_utc_now, normalize_tags
+from app.assets.helpers import (
+    escape_sql_like_string,
+    expand_bucket_prefixes,
+    get_utc_now,
+    normalize_tags,
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +48,26 @@ class SetTagsResult:
     added: list[str]
     removed: list[str]
     total: list[str]
+
+
+def _next_added_at_base(session: Session, reference_id: str) -> datetime:
+    """Return a timestamp strictly greater than any existing
+    `added_at` for this reference. On platforms where the wall clock
+    has insufficient resolution between back-to-back commits (notably
+    Windows), two write batches on the same reference can otherwise
+    share a microsecond — the `ORDER BY added_at, tag_name` retrieval
+    then falls back to the alphabetic tiebreaker and user-tier tags
+    sort ahead of path-tier tags they were meant to follow.
+    """
+    existing_max = session.execute(
+        sa.select(sa.func.max(AssetReferenceTag.added_at)).where(
+            AssetReferenceTag.asset_reference_id == reference_id
+        )
+    ).scalar()
+    now = get_utc_now()
+    if existing_max is None:
+        return now
+    return max(existing_max + timedelta(microseconds=1), now)
 
 
 def validate_tags_exist(session: Session, tags: list[str]) -> None:
@@ -77,7 +103,13 @@ def get_reference_tags(session: Session, reference_id: str) -> list[str]:
             session.execute(
                 select(AssetReferenceTag.tag_name)
                 .where(AssetReferenceTag.asset_reference_id == reference_id)
-                .order_by(AssetReferenceTag.tag_name.asc())
+                # Match the response-path ordering used by
+                # list_references_page / fetch_reference_asset_and_tags so
+                # upload responses and subsequent GETs agree on tag order.
+                .order_by(
+                    AssetReferenceTag.added_at.asc(),
+                    AssetReferenceTag.tag_name.asc(),
+                )
             )
         ).all()
     ]
@@ -89,7 +121,7 @@ def set_reference_tags(
     tags: Sequence[str],
     origin: str = "manual",
 ) -> SetTagsResult:
-    desired = normalize_tags(tags)
+    desired = expand_bucket_prefixes(normalize_tags(tags))
 
     current = set(get_reference_tags(session, reference_id))
 
@@ -98,15 +130,22 @@ def set_reference_tags(
 
     if to_add:
         ensure_tags_exist(session, to_add, tag_type="user")
+        # Stagger added_at by microsecond per tag so the retrieval ORDER BY
+        # added_at preserves input order. Per-tag get_utc_now() calls can
+        # collide at microsecond resolution on fast machines, dropping the
+        # query to the tag_name alphabetical tiebreaker — same fix as in
+        # batch_insert_seed_assets. Read max(existing) so this batch sorts
+        # strictly after any prior batch on the same reference.
+        base_ts = _next_added_at_base(session, reference_id)
         session.add_all(
             [
                 AssetReferenceTag(
                     asset_reference_id=reference_id,
                     tag_name=t,
                     origin=origin,
-                    added_at=get_utc_now(),
+                    added_at=base_ts + timedelta(microseconds=i),
                 )
-                for t in to_add
+                for i, t in enumerate(to_add)
             ]
         )
         session.flush()
@@ -136,7 +175,7 @@ def add_tags_to_reference(
         if not ref:
             raise ValueError(f"AssetReference {reference_id} not found")
 
-    norm = normalize_tags(tags)
+    norm = expand_bucket_prefixes(normalize_tags(tags))
     if not norm:
         total = get_reference_tags(session, reference_id=reference_id)
         return AddTagsResult(added=[], already_present=[], total_tags=total)
@@ -146,10 +185,17 @@ def add_tags_to_reference(
 
     current = set(get_reference_tags(session, reference_id))
 
+    # Preserve the caller's insertion order rather than alphabetizing —
+    # the retrieval ORDER BY added_at + microsecond stagger only meaningfully
+    # preserves insertion order if "the order we insert in" actually matches
+    # the caller's intent.
     want = set(norm)
-    to_add = sorted(want - current)
+    to_add = [t for t in norm if t not in current]
 
     if to_add:
+        # See set_reference_tags for the rationale behind the per-tag stagger
+        # and the max(existing) seed.
+        base_ts = _next_added_at_base(session, reference_id)
         with session.begin_nested() as nested:
             try:
                 session.add_all(
@@ -158,9 +204,9 @@ def add_tags_to_reference(
                             asset_reference_id=reference_id,
                             tag_name=t,
                             origin=origin,
-                            added_at=get_utc_now(),
+                            added_at=base_ts + timedelta(microseconds=i),
                         )
-                        for t in to_add
+                        for i, t in enumerate(to_add)
                     ]
                 )
                 session.flush()

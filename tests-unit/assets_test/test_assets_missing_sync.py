@@ -32,7 +32,7 @@ def test_seed_asset_removed_when_file_is_deleted(
     # Verify it is visible via API and carries no hash (seed)
     r1 = http.get(
         api_base + "/api/assets",
-        params={"include_tags": "unit-tests,syncseed", "name_contains": name},
+        params={"include_tags": "unit-tests/syncseed", "name_contains": name},
         timeout=120,
     )
     body1 = r1.json()
@@ -54,7 +54,7 @@ def test_seed_asset_removed_when_file_is_deleted(
     # It should disappear (AssetInfo and seed Asset gone)
     r2 = http.get(
         api_base + "/api/assets",
-        params={"include_tags": "unit-tests,syncseed", "name_contains": name},
+        params={"include_tags": "unit-tests/syncseed", "name_contains": name},
         timeout=120,
     )
     body2 = r2.json()
@@ -334,7 +334,7 @@ def test_fastpass_removes_stale_state_row_no_missing(
 
     rl = http.get(
         api_base + "/api/assets",
-        params={"include_tags": f"unit-tests,{scope}"},
+        params={"include_tags": f"unit-tests/{scope}"},
         timeout=120,
     )
     bl = rl.json()

@@ -21,6 +21,7 @@ from app.assets.database.queries import (
     get_reference_ids_by_ids,
     ensure_tags_exist,
     add_tags_to_reference,
+    set_reference_tags,
 )
 from app.assets.helpers import get_utc_now
 
@@ -157,6 +158,153 @@ class TestListReferencesPage:
 
         refs, _, _ = list_references_page(session, sort="name", order="asc")
         assert refs[0].name == "large"
+
+
+class TestTagRetrievalOrder:
+    """End-to-end check: tags written through the public write paths come
+    back from the public read paths in insertion order rather than the
+    composite-PK alphabetical order SQLite would otherwise impose.
+
+    Each test deliberately picks tag names that would sort differently
+    under alphabetical vs insertion order, so an alphabetical regression
+    fails loudly.
+    """
+
+    def _make_ref(self, session: Session) -> AssetReference:
+        asset = _make_asset(session, "h1")
+        return _make_reference(session, asset, name="x.bin")
+
+    def test_set_reference_tags_preserves_input_order_in_list(self, session: Session):
+        ref = self._make_ref(session)
+        # "checkpoints" < "models" alphabetically; if added_at stagger
+        # works, list_references_page returns insertion order.
+        set_reference_tags(session, reference_id=ref.id, tags=["models", "checkpoints"])
+        session.commit()
+
+        _, tag_map, _ = list_references_page(session)
+        assert tag_map[ref.id] == ["models", "checkpoints"]
+
+    def test_set_reference_tags_preserves_input_order_in_fetch(self, session: Session):
+        ref = self._make_ref(session)
+        # Subpath tag sorts before "models" alphabetically.
+        set_reference_tags(
+            session,
+            reference_id=ref.id,
+            tags=["models", "diffusers/kolors/text_encoder"],
+        )
+        session.commit()
+
+        result = fetch_reference_asset_and_tags(session, ref.id)
+        assert result is not None
+        _, _, tags = result
+        # Bucket-prefix expansion appends the standalone `diffusers` token
+        # at path-tier (microsecond stagger) so FE set-membership filters
+        # match nested category paths.
+        assert tags == ["models", "diffusers/kolors/text_encoder", "diffusers"]
+
+    def test_add_tags_to_reference_lands_after_path_tags(self, session: Session):
+        ref = self._make_ref(session)
+        set_reference_tags(session, reference_id=ref.id, tags=["models", "checkpoints"])
+        session.commit()
+
+        # "aaa-..." sorts before both path tags alphabetically. If added_at
+        # stagger is missing, alphabetic tiebreak would hoist it to tags[0].
+        add_tags_to_reference(
+            session, reference_id=ref.id, tags=["aaa-user-tag"], origin="manual"
+        )
+        session.commit()
+
+        _, tag_map, _ = list_references_page(session)
+        assert tag_map[ref.id] == ["models", "checkpoints", "aaa-user-tag"]
+
+    def test_multi_tag_batch_lands_after_path_tags(self, session: Session):
+        ref = self._make_ref(session)
+        set_reference_tags(session, reference_id=ref.id, tags=["models", "checkpoints"])
+        session.commit()
+
+        # Three user tags inserted in non-alphabetical input order. Per-tag
+        # microsecond stagger should preserve at least the "user batch is
+        # after path tags" property; within the user batch insertion order
+        # is also preserved.
+        add_tags_to_reference(
+            session,
+            reference_id=ref.id,
+            tags=["zzz-z", "favorite", "experiment-q4"],
+            origin="manual",
+        )
+        session.commit()
+
+        _, tag_map, _ = list_references_page(session)
+        tags = tag_map[ref.id]
+        assert tags[0:2] == ["models", "checkpoints"]
+        assert set(tags[2:]) == {"zzz-z", "favorite", "experiment-q4"}
+
+    def test_user_batch_lands_after_path_batch_under_clock_collision(
+        self, session: Session, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Windows-specific race: when two back-to-back commits share the
+        same datetime.now() microsecond, the path-tier and user-tier
+        added_at values used to collide and alphabetic tiebreak would
+        hoist user tags ahead of path tags. The fix reads
+        max(existing_added_at) for the reference and seeds the next batch
+        past it, deterministically restoring insertion order.
+
+        This test simulates the collision by pinning get_utc_now() so the
+        platform-dependent race becomes a platform-independent failure.
+        """
+        ref = self._make_ref(session)
+
+        from datetime import datetime
+        from app.assets.database import queries as queries_pkg
+        from app.assets.database.queries import tags as tags_module
+
+        frozen = datetime(2026, 1, 1, 0, 0, 0)
+        monkeypatch.setattr(tags_module, "get_utc_now", lambda: frozen)
+        monkeypatch.setattr(queries_pkg, "get_utc_now", lambda: frozen, raising=False)
+
+        set_reference_tags(session, reference_id=ref.id, tags=["models", "checkpoints"])
+        session.commit()
+
+        # Same frozen timestamp — without the max(existing) seed, the
+        # user batch would share added_at with the path batch and
+        # `aaa-user-tag` would sort to position 0 via the alphabetic
+        # tiebreaker.
+        add_tags_to_reference(
+            session, reference_id=ref.id, tags=["aaa-user-tag"], origin="manual"
+        )
+        session.commit()
+
+        _, tag_map, _ = list_references_page(session)
+        assert tag_map[ref.id] == ["models", "checkpoints", "aaa-user-tag"]
+
+    def test_remove_then_add_does_not_disrupt_path_tag_positions(
+        self, session: Session
+    ):
+        ref = self._make_ref(session)
+        set_reference_tags(
+            session,
+            reference_id=ref.id,
+            tags=["models", "loras/my/custom/path"],
+        )
+        session.commit()
+        add_tags_to_reference(session, reference_id=ref.id, tags=["temp-tag"])
+        session.commit()
+        from app.assets.database.queries import remove_tags_from_reference
+
+        remove_tags_from_reference(session, reference_id=ref.id, tags=["temp-tag"])
+        session.commit()
+        add_tags_to_reference(session, reference_id=ref.id, tags=["second-tag"])
+        session.commit()
+
+        _, tag_map, _ = list_references_page(session)
+        # `loras` is expanded from the nested category path; user-added
+        # tags trail behind it via the microsecond stagger.
+        assert tag_map[ref.id] == [
+            "models",
+            "loras/my/custom/path",
+            "loras",
+            "second-tag",
+        ]
 
 
 class TestFetchReferenceAssetAndTags:

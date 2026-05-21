@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import Literal
 
 import folder_paths
-from app.assets.helpers import normalize_tags
 
 
 _NON_MODEL_FOLDER_NAMES = frozenset({"custom_nodes"})
@@ -27,27 +26,51 @@ def get_comfy_models_folders() -> list[tuple[str, list[str]]]:
 
 
 def resolve_destination_from_tags(tags: list[str]) -> tuple[str, list[str]]:
-    """Validates and maps tags -> (base_dir, subdirs_for_fs)"""
+    """Validates and maps tags -> (base_dir, subdirs_for_fs).
+
+    Accepts both the legacy one-tag-per-directory shape
+    (``["models", "diffusers", "Kolors", "text_encoder"]``) and the
+    slash-joined shape emitted by :func:`get_name_and_tags_from_asset_path`
+    (``["models", "diffusers/Kolors/text_encoder"]``). Hybrid shapes that
+    mix the two within a single call (e.g.
+    ``["models", "diffusers", "Kolors/text_encoder"]``) are also
+    accepted: each entry after ``tags[0]`` is split on ``/`` and
+    concatenated, so the two shapes — and any mix of them — resolve to
+    the same destination. The same safety checks are applied to each
+    component after expansion.
+    """
     if not tags:
         raise ValueError("tags must not be empty")
     root = tags[0].lower()
+
+    # Expand any slash-joined entries into individual path components so
+    # the rest of the function can treat both tag shapes uniformly. Each
+    # component is also stripped, so " a / b " behaves like ["a", "b"].
+    expanded: list[str] = []
+    for t in tags[1:]:
+        for part in str(t).split("/"):
+            part = part.strip()
+            if part:
+                expanded.append(part)
+
     if root == "models":
-        if len(tags) < 2:
+        if not expanded:
             raise ValueError("at least two tags required for model asset")
+        category = expanded[0]
         try:
-            bases = folder_paths.folder_names_and_paths[tags[1]][0]
+            bases = folder_paths.folder_names_and_paths[category][0]
         except KeyError:
-            raise ValueError(f"unknown model category '{tags[1]}'")
+            raise ValueError(f"unknown model category '{category}'")
         if not bases:
-            raise ValueError(f"no base path configured for category '{tags[1]}'")
+            raise ValueError(f"no base path configured for category '{category}'")
         base_dir = os.path.abspath(bases[0])
-        raw_subdirs = tags[2:]
+        raw_subdirs = expanded[1:]
     elif root == "input":
         base_dir = os.path.abspath(folder_paths.get_input_directory())
-        raw_subdirs = tags[1:]
+        raw_subdirs = expanded
     elif root == "output":
         base_dir = os.path.abspath(folder_paths.get_output_directory())
-        raw_subdirs = tags[1:]
+        raw_subdirs = expanded
     else:
         raise ValueError(f"unknown root tag '{tags[0]}'; expected 'models', 'input', or 'output'")
     _sep_chars = frozenset(("/", "\\", os.sep))
@@ -160,7 +183,21 @@ def get_name_and_tags_from_asset_path(file_path: str) -> tuple[str, list[str]]:
     """Return (name, tags) derived from a filesystem path.
 
     - name: base filename with extension
-    - tags: [root_category] + parent folder names in order
+    - tags: [root_category] for paths with no parent subdirectories,
+      [root_category, slash_joined_subpath] otherwise. The parent subpath
+      (everything between the root category and the filename) is collapsed
+      into a single tag rather than emitted as one tag per directory, so
+      consumers can use ``tags[1]`` as a stable category identifier that
+      survives nested directory layouts (e.g. diffusers components).
+
+      The subpath is lowercased to match the canonicalization applied by
+      :func:`ensure_tags_exist`; without that, the
+      ``asset_reference_tags.tag_name`` FK to the lowercased ``tags.name``
+      would fail for any path containing uppercase letters. The root
+      category is lowercase by construction in
+      :func:`get_asset_category_and_relative_path`, so no separate cast
+      is applied here. Consumers that need to look up providers keyed on
+      original-case paths should normalize their lookup key to lowercase.
 
     Raises:
         ValueError: path does not belong to any known root.
@@ -170,4 +207,7 @@ def get_name_and_tags_from_asset_path(file_path: str) -> tuple[str, list[str]]:
     parent_parts = [
         part for part in p.parent.parts if part not in (".", "..", p.anchor)
     ]
-    return p.name, list(dict.fromkeys(normalize_tags([root_category, *parent_parts])))
+    tags = [root_category]
+    if parent_parts:
+        tags.append("/".join(parent_parts).lower())
+    return p.name, list(dict.fromkeys(t.strip() for t in tags if t.strip()))

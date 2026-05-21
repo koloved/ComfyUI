@@ -29,7 +29,10 @@ def create_seed_file(comfy_tmp_base_dir: Path):
 def find_asset(http: requests.Session, api_base: str):
     """Query API for assets matching scope and optional name."""
     def _find(scope: str, name: str | None = None) -> list[dict]:
-        params = {"include_tags": f"unit-tests,{scope}"}
+        # Scanner now emits tags as ``[root, "<dir1>/<dir2>/..."]`` rather than
+        # one tag per directory. For files at ``<root>/unit-tests/<scope>/...``
+        # the second tag is exactly ``"unit-tests/<scope>"``.
+        params = {"include_tags": f"unit-tests/{scope}"}
         if name:
             params["name_contains"] = name
         r = http.get(f"{api_base}/api/assets", params=params, timeout=120)
@@ -138,4 +141,7 @@ def test_special_chars_in_path_escaped_correctly(
     trigger_sync_seed_assets(http, api_base)
     trigger_sync_seed_assets(http, api_base)
 
-    assert find_asset(scope.split("/")[0], fp.name), "Asset with special chars should survive"
+    # Scanner emits the full parent subpath as a single slash-joined tag, so
+    # the lookup tag is ``unit-tests/<scope>`` even when <scope> itself
+    # contains a slash (parent + special-char dirname).
+    assert find_asset(scope, fp.name), "Asset with special chars should survive"

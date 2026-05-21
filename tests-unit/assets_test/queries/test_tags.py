@@ -160,6 +160,120 @@ class TestAddTagsToReference:
             add_tags_to_reference(session, reference_id="nonexistent", tags=["x"])
 
 
+class TestBucketPrefixExpansion:
+    """The standalone bucket token must appear in the asset's tag set for
+    nested category paths so FE filters like
+    `include_tags=models,checkpoints` continue to match.
+    """
+
+    def test_set_reference_tags_inserts_bucket_for_nested_path(
+        self, session: Session
+    ):
+        asset = _make_asset(session, "hash-nested")
+        ref = _make_reference(session, asset)
+
+        result = set_reference_tags(
+            session,
+            reference_id=ref.id,
+            tags=["models", "checkpoints/flux"],
+        )
+        session.commit()
+
+        assert set(result.total) == {"models", "checkpoints/flux", "checkpoints"}
+        stored = get_reference_tags(session, reference_id=ref.id)
+        # tag[1] keeps the slash-joined positional contract; the standalone
+        # bucket lands after it via path-tier microsecond stagger so user
+        # tags remain at the tail.
+        assert stored[:3] == ["models", "checkpoints/flux", "checkpoints"]
+
+    def test_set_reference_tags_idempotent_on_replay(self, session: Session):
+        asset = _make_asset(session, "hash-replay")
+        ref = _make_reference(session, asset)
+
+        set_reference_tags(
+            session,
+            reference_id=ref.id,
+            tags=["models", "checkpoints/flux"],
+        )
+        # Replay with the same caller-supplied set; expansion is already
+        # baked in, so nothing should be added or removed.
+        result = set_reference_tags(
+            session,
+            reference_id=ref.id,
+            tags=["models", "checkpoints/flux"],
+        )
+        session.commit()
+
+        assert result.added == []
+        assert result.removed == []
+        assert set(result.total) == {"models", "checkpoints/flux", "checkpoints"}
+
+    def test_add_tags_to_reference_expands_bucket(self, session: Session):
+        asset = _make_asset(session, "hash-add")
+        ref = _make_reference(session, asset)
+
+        result = add_tags_to_reference(
+            session,
+            reference_id=ref.id,
+            tags=["loras/style/v2"],
+        )
+        session.commit()
+
+        assert set(result.added) == {"loras/style/v2", "loras"}
+        stored = get_reference_tags(session, reference_id=ref.id)
+        assert "loras" in stored
+        assert "loras/style/v2" in stored
+
+    def test_add_tags_does_not_duplicate_existing_bucket(self, session: Session):
+        asset = _make_asset(session, "hash-dedupe")
+        ref = _make_reference(session, asset)
+
+        add_tags_to_reference(
+            session, reference_id=ref.id, tags=["models", "checkpoints"]
+        )
+        result = add_tags_to_reference(
+            session, reference_id=ref.id, tags=["checkpoints/flux"]
+        )
+        session.commit()
+
+        # `checkpoints` was already there from the first add; only the
+        # slash-joined token is genuinely new.
+        assert result.added == ["checkpoints/flux"]
+        assert "checkpoints" in result.already_present
+
+    def test_flat_category_is_unaffected(self, session: Session):
+        asset = _make_asset(session, "hash-flat")
+        ref = _make_reference(session, asset)
+
+        result = set_reference_tags(
+            session,
+            reference_id=ref.id,
+            tags=["models", "checkpoints"],
+        )
+        session.commit()
+
+        assert set(result.total) == {"models", "checkpoints"}
+        assert get_reference_tags(session, reference_id=ref.id) == [
+            "models",
+            "checkpoints",
+        ]
+
+    def test_unknown_prefix_passes_through(self, session: Session):
+        asset = _make_asset(session, "hash-user")
+        ref = _make_reference(session, asset)
+
+        # `my-org` isn't a registered bucket — the slash-joined user tag
+        # should not trigger bucket expansion.
+        result = set_reference_tags(
+            session,
+            reference_id=ref.id,
+            tags=["my-org/team-a"],
+        )
+        session.commit()
+
+        assert result.total == ["my-org/team-a"]
+
+
 class TestRemoveTagsFromReference:
     def test_removes_tags(self, session: Session):
         asset = _make_asset(session, "hash1")

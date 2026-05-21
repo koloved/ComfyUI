@@ -285,9 +285,15 @@ def test_metadata_filename_is_set_for_seed_asset_without_hash(
 
     trigger_sync_seed_assets(http, api_base)
 
+    # Scanner emits tags as ``[root, "<dir1>/<dir2>/..."]`` — the second tag
+    # is the slash-joined parent subpath. For ``<root>/unit-tests/<scope>/a/b/<name>``
+    # the second tag is ``"unit-tests/<scope>/a/b"``.
     r1 = http.get(
         api_base + "/api/assets",
-        params={"include_tags": f"unit-tests,{scope}", "name_contains": name},
+        params={
+            "include_tags": f"unit-tests/{scope}/a/b",
+            "name_contains": name,
+        },
         timeout=120,
     )
     body = r1.json()
