@@ -21,7 +21,12 @@ from app.assets.database.queries.common import (
     build_visible_owner_clause,
     iter_row_chunks,
 )
-from app.assets.helpers import escape_sql_like_string, get_utc_now, normalize_tags
+from app.assets.helpers import (
+    escape_sql_like_string,
+    expand_bucket_prefixes,
+    get_utc_now,
+    normalize_tags,
+)
 
 
 @dataclass(frozen=True)
@@ -96,7 +101,7 @@ def set_reference_tags(
     tags: Sequence[str],
     origin: str = "manual",
 ) -> SetTagsResult:
-    desired = normalize_tags(tags)
+    desired = expand_bucket_prefixes(normalize_tags(tags))
 
     current = set(get_reference_tags(session, reference_id))
 
@@ -149,7 +154,7 @@ def add_tags_to_reference(
         if not ref:
             raise ValueError(f"AssetReference {reference_id} not found")
 
-    norm = normalize_tags(tags)
+    norm = expand_bucket_prefixes(normalize_tags(tags))
     if not norm:
         total = get_reference_tags(session, reference_id=reference_id)
         return AddTagsResult(added=[], already_present=[], total_tags=total)

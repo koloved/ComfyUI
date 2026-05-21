@@ -13,13 +13,14 @@ from app.assets.database.queries import (
     bulk_insert_references_ignore_conflicts,
     bulk_insert_tags_and_meta,
     delete_assets_by_ids,
+    ensure_tags_exist,
     get_existing_asset_ids,
     get_reference_ids_by_ids,
     get_references_by_paths_and_asset_ids,
     get_unreferenced_unhashed_asset_ids,
     restore_references_by_paths,
 )
-from app.assets.helpers import get_utc_now
+from app.assets.helpers import expand_bucket_prefixes, get_utc_now
 
 if TYPE_CHECKING:
     from app.assets.services.metadata_extract import ExtractedMetadata
@@ -239,7 +240,8 @@ def batch_insert_seed_assets(
             # this, every tag in a bulk-insert batch shares current_time and
             # the tag_name tiebreaker sorts them alphabetically — putting the
             # subpath tag ahead of "models" since "c"/"d"/"l" < "m".
-            for tag_idx, tag in enumerate(ref_data["tags"]):
+            ref_tags = expand_bucket_prefixes(ref_data["tags"])
+            for tag_idx, tag in enumerate(ref_tags):
                 tag_rows.append(
                     {
                         "asset_reference_id": ref_id,
@@ -266,6 +268,16 @@ def batch_insert_seed_assets(
                         "val_json": None,
                     }
                 )
+
+    if tag_rows:
+        # Bucket-prefix expansion may have introduced tags the caller did
+        # not register via the upstream tag_pool (e.g. `checkpoints` for a
+        # nested `checkpoints/flux/foo` path). Pre-register the full set so
+        # the AssetReferenceTag.tag_name FK is satisfied; the underlying
+        # insert is ON CONFLICT DO NOTHING so re-registration is idempotent.
+        ensure_tags_exist(
+            session, {row["tag_name"] for row in tag_rows}, tag_type="user"
+        )
 
     bulk_insert_tags_and_meta(session, tag_rows=tag_rows, meta_rows=metadata_rows)
 

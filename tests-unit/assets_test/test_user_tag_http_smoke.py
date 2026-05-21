@@ -87,3 +87,49 @@ def test_user_tag_batch_lands_after_path_tags_via_http(
     # Critically: alphabetical sort would put 'aaa-experiment' at position 0.
     assert tags_after.index("aaa-experiment") > tags_after.index("models")
     assert tags_after.index("aaa-experiment") > tags_after.index("checkpoints")
+
+
+@pytest.fixture
+def nested_checkpoint_asset(http: requests.Session, api_base: str):
+    """Upload a checkpoint at the slash-joined path shape cloud emits
+    (`models/checkpoints/flux/...`), then delete it on teardown.
+    """
+    name = "nested_checkpoint.safetensors"
+    tags = ["models", "checkpoints/flux"]
+    files = {"file": (name, b"S" * 4096, "application/octet-stream")}
+    form_data = {
+        "tags": json.dumps(tags),
+        "name": name,
+        "user_metadata": json.dumps({}),
+    }
+    r = http.post(api_base + "/api/assets", files=files, data=form_data, timeout=120)
+    assert r.status_code == 201, r.text
+    body = r.json()
+    yield body
+    http.delete(
+        f"{api_base}/api/assets/{body['id']}?delete_content=true", timeout=30
+    )
+
+
+def test_nested_checkpoint_satisfies_fe_set_filter(
+    http: requests.Session, api_base: str, nested_checkpoint_asset: dict
+):
+    """The case Simon flagged: a nested-path checkpoint must still match
+    `include_tags=models,checkpoints` — the FE combo-widget filter.
+    """
+    ref_id = nested_checkpoint_asset["id"]
+
+    stored = _fetch_asset_tags(http, api_base, ref_id)
+    # tag[1] keeps cloud's slash-joined positional contract; tag[2] holds
+    # the standalone bucket the FE filter looks for.
+    assert stored[:3] == ["models", "checkpoints/flux", "checkpoints"]
+
+    # The actual FE query — exact set-membership across both tokens.
+    r = http.get(
+        f"{api_base}/api/assets",
+        params=[("include_tags", "models"), ("include_tags", "checkpoints")],
+        timeout=30,
+    )
+    assert r.status_code == 200, r.text
+    returned_ids = {a["id"] for a in r.json()["assets"]}
+    assert ref_id in returned_ids

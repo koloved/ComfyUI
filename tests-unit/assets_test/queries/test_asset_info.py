@@ -197,7 +197,10 @@ class TestTagRetrievalOrder:
         result = fetch_reference_asset_and_tags(session, ref.id)
         assert result is not None
         _, _, tags = result
-        assert tags == ["models", "diffusers/kolors/text_encoder"]
+        # Bucket-prefix expansion appends the standalone `diffusers` token
+        # at path-tier (microsecond stagger) so FE set-membership filters
+        # match nested category paths.
+        assert tags == ["models", "diffusers/kolors/text_encoder", "diffusers"]
 
     def test_add_tags_to_reference_lands_after_path_tags(self, session: Session):
         ref = self._make_ref(session)
@@ -256,7 +259,14 @@ class TestTagRetrievalOrder:
         session.commit()
 
         _, tag_map, _ = list_references_page(session)
-        assert tag_map[ref.id] == ["models", "loras/my/custom/path", "second-tag"]
+        # `loras` is expanded from the nested category path; user-added
+        # tags trail behind it via the microsecond stagger.
+        assert tag_map[ref.id] == [
+            "models",
+            "loras/my/custom/path",
+            "loras",
+            "second-tag",
+        ]
 
 
 class TestFetchReferenceAssetAndTags:

@@ -401,12 +401,16 @@ async def upload_asset(request: web.Request) -> web.Response:
         )
 
     if spec.tags and spec.tags[0] == "models":
+        # tag[1] may be the standalone category ("checkpoints") or the
+        # slash-joined shape ("checkpoints/flux/...") that
+        # `get_name_and_tags_from_asset_path` and cloud both emit. Match
+        # `resolve_destination_from_tags` by extracting the first segment.
+        category = spec.tags[1].split("/", 1)[0] if len(spec.tags) >= 2 else ""
         if (
             len(spec.tags) < 2
-            or spec.tags[1] not in folder_paths.folder_names_and_paths
+            or category not in folder_paths.folder_names_and_paths
         ):
             delete_temp_file_if_exists(parsed.tmp_path)
-            category = spec.tags[1] if len(spec.tags) >= 2 else ""
             return _build_error_response(
                 400, "INVALID_BODY", f"unknown models category '{category}'"
             )
