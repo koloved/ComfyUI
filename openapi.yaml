@@ -2358,8 +2358,8 @@ paths:
                     description: ID of the download task; use to poll status.
                   status:
                     type: string
-                    enum: [pending, running, completed, failed]
-                    description: Current task status (typically `pending` on initial creation).
+                    enum: [created, running, completed, failed]
+                    description: Current task status (typically `created` on initial creation).
                   message:
                     type: string
                     description: Human-readable task message.
@@ -2418,8 +2418,8 @@ paths:
                     description: ID of the export task; use to poll status.
                   status:
                     type: string
-                    enum: [pending, running, completed, failed]
-                    description: Current task status (typically `pending` on initial creation).
+                    enum: [created, running, completed, failed]
+                    description: Current task status (typically `created` on initial creation).
                   message:
                     type: string
                     description: Human-readable task message.
