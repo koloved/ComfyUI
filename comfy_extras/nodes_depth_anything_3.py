@@ -172,8 +172,8 @@ class DepthAnything3Inference(io.ComfyNode):
                                tooltip="- upper_bound_resize: scale so the longest side = process_res (caps memory, default).\n"
                                        "- lower_bound_resize: scale so the shortest side = process_res (preserves more detail on tall/wide images, uses more memory)."),
                 io.DynamicCombo.Input("mode",
-                                      tooltip="- mono: single image or independent batch — use with any model.\n"
-                                              "- multiview: all frames processed together with cross-view attention for geometric consistency; also outputs camera pose — requires DA3-Small or DA3-Base.",
+                                      tooltip="- mono: single image or independent batch — works with any model variant.\n"
+                                              "- multiview: all frames processed together for geometric consistency + camera pose — requires DA3-Small or DA3-Base (DA3-Mono-Large / DA3-Metric-Large do NOT support this mode).",
                                       options=[
                     io.DynamicCombo.Option("mono", []),
                     io.DynamicCombo.Option("multiview", [
@@ -188,8 +188,9 @@ class DepthAnything3Inference(io.ComfyNode):
                         io.Combo.Input("pose_method",
                                        options=["cam_dec", "ray_pose"],
                                        default="cam_dec",
-                                               tooltip="- cam_dec: small MLP on the final camera token (DA3-Small/Base).\n"
-                                               "- ray_pose: RANSAC over the DualDPT ray output (DA3-Small/Base only)."),
+                                               tooltip="- cam_dec: small MLP on the final camera token — works on DA3-Small and DA3-Base.\n"
+                                               "- ray_pose: RANSAC over the DualDPT ray output — works on DA3-Small and DA3-Base.\n"
+                                               "Both methods require DA3-Small or DA3-Base; this setting is ignored on Mono/Metric-Large."),
                     ]),
                 ]),
             ],
@@ -208,22 +209,33 @@ class DepthAnything3Inference(io.ComfyNode):
         if mode_val == "mono":
             return cls._execute_mono(da3_model, image, process_res, resize_method)
 
-        # Capability checks for multi-view pose.
+        # Capability checks for multi-view mode.
         diffusion = da3_model.model.diffusion_model
         pose_method = mode["pose_method"]
         ref_view_strategy = mode["ref_view_strategy"]
 
-        if pose_method == "cam_dec" and diffusion.cam_dec is None:
+        has_cam_dec = diffusion.cam_dec is not None
+        has_dualdpt = diffusion.head_type == "dualdpt"
+
+        if not has_cam_dec and not has_dualdpt:
+            raise ValueError(
+                "multiview mode requires DA3-Small or DA3-Base — the loaded model "
+                f"(head_type='{diffusion.head_type}') does not support cross-view "
+                "attention or camera pose estimation. Switch mode to 'mono', or "
+                "load DA3-Small / DA3-Base for multiview."
+            )
+
+        if pose_method == "cam_dec" and not has_cam_dec:
             raise ValueError(
                 "pose_method='cam_dec' requires a camera decoder, but the loaded "
-                "model does not have one. Load a model with a camera decoder "
-                "(e.g. DA3-Small or DA3-Base), or set pose_method='ray_pose'."
+                f"model (head_type='{diffusion.head_type}') does not have one. "
+                "Use pose_method='ray_pose' instead."
             )
-        if pose_method == "ray_pose" and diffusion.head_type != "dualdpt":
+        if pose_method == "ray_pose" and not has_dualdpt:
             raise ValueError(
                 "pose_method='ray_pose' requires a DualDPT head, but the loaded "
-                "model has a DPT head. Load a model with a DualDPT head "
-                "(e.g. DA3-Small or DA3-Base), or set pose_method='cam_dec'."
+                f"model has a '{diffusion.head_type}' head. "
+                "Use pose_method='cam_dec' instead."
             )
 
         return cls._execute_multiview(
