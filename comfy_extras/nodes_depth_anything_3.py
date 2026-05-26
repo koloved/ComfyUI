@@ -2,13 +2,13 @@
 
 Adds these nodes:
 
-* ``LoadDepthAnything3`` -- load a DA3 ``.safetensors`` file from the
+* ``LoadDA3Model`` -- load a DA3 ``.safetensors`` file from the
   ``models/geometry_estimation/`` folder.
-* ``DepthAnything3`` -- unified depth estimation node supporting both mono and
+* ``DA3Inference`` -- unified depth estimation node supporting both mono and
   multi-view modes via a DynamicCombo selector. Returns a DA3_GEOMETRY dict of
-  raw tensors (depth, sky, confidence, camera). Feed into ``DepthAnything3Render``
+  raw tensors (depth, sky, confidence, camera). Feed into ``DA3Render``
   to produce display images, or directly into ``MoGeRender`` for depth / mask views.
-* ``DepthAnything3Render`` -- post-processes a DA3_GEOMETRY dict: applies optional
+* ``DA3Render`` -- post-processes a DA3_GEOMETRY dict: applies optional
   sky clipping, normalises depth and confidence, and returns display images.
 
 Model capability matrix
@@ -158,11 +158,11 @@ def _da3_build_mask(geometry: dict, b: int, H: int, W: int,
     return mask
 
 
-class LoadDepthAnything3Model(io.ComfyNode):
+class LoadDA3Model(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="LoadDepthAnything3Model",
+            node_id="LoadDA3Model",
             display_name="Load Depth Anything 3",
             category="loaders",
             inputs=[
@@ -240,12 +240,12 @@ def _run_da3(model_patcher, image: torch.Tensor, process_res: int,
     return depth, confidence, sky
 
 
-class DepthAnything3Inference(io.ComfyNode):
+class DA3Inference(io.ComfyNode):
     """Raw Depth Anything 3 inference node.
 
     Outputs a DA3_GEOMETRY dict of raw tensors. All display normalization
     (sky clipping, depth scaling, confidence normalisation) is handled by
-    the companion ``DepthAnything3Render`` node.
+    the companion ``DA3Render`` node.
 
     Mono mode: each batch element is processed independently.
     Multi-view mode: all frames share a single forward pass with cross-view
@@ -255,7 +255,7 @@ class DepthAnything3Inference(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="DepthAnything3Inference",
+            node_id="DA3Inference",
             search_aliases=["depth", "geometry", "da3", "depth anything", "monocular", "pointmap", "sky", "3d", "metric depth", "disparity"],
             display_name="Run Depth Anything 3",
             category="image/geometry_estimation",
@@ -423,7 +423,7 @@ class DepthAnything3Inference(io.ComfyNode):
 
 
 
-class DepthAnything3Render(io.ComfyNode):
+class DA3Render(io.ComfyNode):
     """Visualise a DA3_GEOMETRY packet as a single image.
 
     Mirrors the MoGeRender interface: one ``output`` selector, one IMAGE out.
@@ -446,7 +446,7 @@ class DepthAnything3Render(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="DepthAnything3Render",
+            node_id="DA3Render",
             display_name="Depth Anything 3 Render",
             category="image/geometry_estimation",
             description="Visualise a DA3_GEOMETRY packet. Drop multiple nodes to get different views simultaneously.",
@@ -731,17 +731,17 @@ class DA3GeometryToPointCloud(io.ComfyNode):
         })
 
 
-class DepthAnything3Extension(ComfyExtension):
+class DA3Extension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
-            LoadDepthAnything3Model,
-            DepthAnything3Inference,
-            DepthAnything3Render,
+            LoadDA3Model,
+            DA3Inference,
+            DA3Render,
             DA3GeometryToMesh,
             # DA3GeometryToPointCloud,  # Keep this commented out for now until we have a proper PointCloud output type
         ]
 
 
-async def comfy_entrypoint() -> DepthAnything3Extension:
-    return DepthAnything3Extension()
+async def comfy_entrypoint() -> DA3Extension:
+    return DA3Extension()
