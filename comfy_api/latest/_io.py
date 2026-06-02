@@ -1198,26 +1198,19 @@ class DynamicCombo(ComfyTypeI):
 class DynamicSlot(ComfyTypeI):
     """A slot whose revealed inputs depend on the type connected upstream.
 
-    Options dispatch on the type resolved by
-    :py:class:`comfy_execution.type_resolver.TypeResolver`:
+    Each ``Option`` declares a ``when`` condition; the first option whose
+    condition matches the slot's resolved upstream type (or whose
+    ``when=None`` matches an empty slot) decides which child inputs are
+    exposed.
 
-      * ``Option(when=None, ...)`` — nothing connected to the slot.
-      * ``Option(when=io.AnyType, ...)`` — link present, upstream resolves to ``"*"``
-        (e.g. Reroute, generic If/Else, V1 nodes that declare AnyType outputs).
-      * ``Option(when=io.Image, ...)`` — upstream resolves to ``IMAGE``.
-      * ``Option(when=[io.Image, io.Mask], ...)`` — share children across types.
-      * ``Option(when=io.MultiType.Input(...), ...)`` — same as the list form.
+    Each concrete type may appear in at most one option's ``when``, so the
+    matching branch is unambiguous. The unconnected case (``when=None``) is
+    its own bucket and may also appear at most once.
 
-    On a connected slot the first option whose ``when`` set intersects the
-    resolved type set wins; on an unconnected slot the first ``when=None``
-    option wins. No implicit "match anything I didn't enumerate" fallback —
-    declare ``when=io.AnyType`` if you want it.
-
-    Known limitation: when an upstream node declares its output as ``AnyType``
-    (Reroute, generic forwarders, many V1 utilities) the resolver can only
-    report ``"*"`` — it cannot introspect the runtime value to recover a more
-    specific type. Such links will always select the ``when=io.AnyType``
-    branch (or no branch), never a concrete-type branch.
+    The AnyType limitation documented in
+    :py:mod:`comfy_execution.type_resolver` applies: an upstream output
+    declared as ``AnyType`` resolves to ``"*"`` and will only match a
+    ``when=io.AnyType`` option, never a concrete-type one.
     """
     Type = dict[str, Any]
 
@@ -1234,17 +1227,22 @@ class DynamicSlot(ComfyTypeI):
         def __init__(self, when: Any, inputs: list[Input]):
             self.when = when
             self.inputs = inputs
+            # ``_when_types`` is the ordered tuple of io_types (deterministic);
+            # ``_when_set`` is the same content as a set for fast matching.
             self._when_types = self._normalize_when(when)
+            self._when_set: frozenset[str] | None = (
+                None if self._when_types is None else frozenset(self._when_types)
+            )
 
         @staticmethod
-        def _normalize_when(when: Any) -> frozenset[str] | None:
-            """Normalize ``when`` to a ``frozenset[str]`` of io_types, or ``None`` for the unconnected case."""
+        def _normalize_when(when: Any) -> tuple[str, ...] | None:
+            """Normalize ``when`` to an ordered, deduplicated tuple of io_types, or ``None`` for the unconnected case."""
             if when is None:
                 return None
             if isinstance(when, type) and issubclass(when, _ComfyType):
-                return frozenset([when.io_type])
+                return (when.io_type,)
             if isinstance(when, MultiType.Input):
-                return frozenset(t.io_type for t in when.io_types)
+                return tuple(dict.fromkeys(t.io_type for t in when.io_types))
             if isinstance(when, Iterable) and not isinstance(when, str):
                 types: list[str] = []
                 for t in when:
@@ -1252,10 +1250,11 @@ class DynamicSlot(ComfyTypeI):
                         raise ValueError(
                             f"DynamicSlot.Option: list entries must be ComfyType classes, got {t!r}"
                         )
-                    types.append(t.io_type)
+                    if t.io_type not in types:
+                        types.append(t.io_type)
                 if not types:
                     raise ValueError("DynamicSlot.Option: when=[] is not allowed; use when=None instead")
-                return frozenset(types)
+                return tuple(types)
             raise ValueError(
                 "DynamicSlot.Option: when must be None, a ComfyType class, a list of ComfyType classes, "
                 f"or a MultiType.Input; got {when!r}"
@@ -1263,7 +1262,7 @@ class DynamicSlot(ComfyTypeI):
 
         def as_dict(self):
             return {
-                "when": None if self._when_types is None else sorted(self._when_types),
+                "when": None if self._when_types is None else list(self._when_types),
                 "inputs": create_input_dict_v1(self.inputs),
             }
 
@@ -1272,18 +1271,34 @@ class DynamicSlot(ComfyTypeI):
                     display_name: str=None, tooltip: str=None, lazy: bool=None, extra_dict=None):
             if not options:
                 raise ValueError("DynamicSlot.Input: at least one Option is required")
+            for opt in options:
+                if not isinstance(opt, DynamicSlot.Option):
+                    raise ValueError(
+                        f"DynamicSlot.Input: options must be DynamicSlot.Option instances, got {opt!r}"
+                    )
             super().__init__(id, display_name, True, tooltip, lazy, extra_dict)
             self.options = options
-            # Auto-derive the slot's declared connection type as the union of
-            # every non-None option's `when` set. Order is preserved per option,
-            # then deduplicated, so authors control the displayed precedence.
+            # Enforce uniqueness: each io_type (and the unconnected case) may
+            # appear in at most one option's ``when``. Also derive the slot's
+            # declared connection type as the ordered union of every non-None
+            # option's ``when`` set so authors control displayed precedence.
+            seen_types: set[str] = set()
+            seen_none = False
             connected_types: list[str] = []
             for opt in options:
                 if opt._when_types is None:
+                    if seen_none:
+                        raise ValueError("DynamicSlot.Input: only one Option may declare when=None")
+                    seen_none = True
                     continue
                 for t in opt._when_types:
-                    if t not in connected_types:
-                        connected_types.append(t)
+                    if t in seen_types:
+                        raise ValueError(
+                            f"DynamicSlot.Input: type {t!r} appears in more than one Option's `when`; "
+                            "each type must be claimed by exactly one option"
+                        )
+                    seen_types.add(t)
+                    connected_types.append(t)
             if not connected_types:
                 raise ValueError(
                     "DynamicSlot.Input: at least one Option must have a non-None `when`; "
@@ -1291,21 +1306,19 @@ class DynamicSlot(ComfyTypeI):
                 )
             self._slot_io_type = ",".join(connected_types)
 
-        # NOTE: do NOT override get_io_type — parse_class_inputs uses the class
-        # io_type (COMFY_DYNAMICSLOT_V3) to dispatch into the dynamic expander.
-        # The auto-derived connection type is published via the `slotType` field
-        # in as_dict() so the frontend knows what links are accepted.
+        # parse_class_inputs dispatches on the class io_type (COMFY_DYNAMICSLOT_V3),
+        # so get_all/get_io_type must not be overridden; slotType is published via as_dict.
 
         def get_all(self) -> list[Input]:
             seen_ids: set[str] = set()
-            out: list[Input] = []
+            children: list[Input] = []
             for opt in self.options:
                 for inp in opt.inputs:
                     if inp.id in seen_ids:
                         continue
                     seen_ids.add(inp.id)
-                    out.append(inp)
-            return out
+                    children.append(inp)
+            return [self] + children
 
         def as_dict(self):
             return super().as_dict() | prune_dict({
@@ -1321,10 +1334,13 @@ class DynamicSlot(ComfyTypeI):
     @staticmethod
     def _select_option(options: list[dict[str, Any]], live_input_types: dict[str, str] | None,
                        finalized_id: str, has_link: bool) -> dict[str, Any] | None:
-        """Pick the first option whose ``when`` matches the slot's current state.
+        """Pick the first option whose ``when`` matches the slot's state.
 
-        Matching is set intersection against the resolved type string split on
-        commas (so MultiType outputs like ``"IMAGE,MASK"`` work naturally).
+        Connected: pick the first option whose ``when`` set intersects the
+        comma-split resolved type. Unconnected: pick the first ``when=None``.
+        With per-option type uniqueness, at most one connected option can match
+        any single concrete type; ordering only matters when upstream declares
+        a multi-type union (e.g. ``"IMAGE,MASK"``).
         """
         if not has_link:
             for opt in options:
@@ -1332,7 +1348,7 @@ class DynamicSlot(ComfyTypeI):
                     return opt
             return None
         resolved = (live_input_types or {}).get(finalized_id, "*")
-        resolved_set = set(t.strip() for t in resolved.split(","))
+        resolved_set = {t.strip() for t in resolved.split(",")}
         for opt in options:
             when = opt["when"]
             if when is None:
@@ -1350,8 +1366,7 @@ class DynamicSlot(ComfyTypeI):
         if selected is not None:
             parse_class_inputs(out_dict, live_inputs, selected["inputs"], curr_prefix, live_input_types)
         # Always advertise the slot itself so the connector renders even when no
-        # option matched (e.g. resolved type wasn't enumerated and there's no
-        # AnyType option). Unmatched cases just expand no children.
+        # option matched (unmatched concrete + no AnyType option).
         out_dict[input_type][finalized_id] = value
         out_dict["dynamic_paths"][finalized_id] = finalize_prefix(curr_prefix, curr_prefix[-1])
 

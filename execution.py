@@ -152,15 +152,14 @@ class CacheSet:
 
 SENSITIVE_EXTRA_DATA_KEYS = ("auth_token_comfy_org", "api_key_comfy_org")
 
-def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=None, extra_data={}):
+def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=None, extra_data={}, live_input_types=None):
     is_v3 = issubclass(class_def, _ComfyNodeInternal)
     v3_data: io.V3Data = {}
     hidden_inputs_v3 = {}
     valid_inputs = class_def.INPUT_TYPES()
     if is_v3:
         # Let dynamic schemas branch on resolved upstream types, not just literal values.
-        live_input_types = None
-        if dynprompt is not None and hasattr(dynprompt, "get_type_resolver"):
+        if live_input_types is None and dynprompt is not None and hasattr(dynprompt, "get_type_resolver"):
             live_input_types = dynprompt.get_type_resolver().compute_live_input_types(unique_id)
         valid_inputs, hidden, v3_data = _io.get_finalized_class_inputs(valid_inputs, inputs, live_input_types=live_input_types)
     input_data_all = {}
@@ -867,6 +866,7 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None, typ
     v3_data = None
     validate_function_inputs = []
     validate_has_kwargs = False
+    live_input_types = None
     if issubclass(obj_class, _ComfyNodeInternal):
         obj_class: _io._ComfyNodeBaseInternal
         class_inputs = obj_class.INPUT_TYPES()
@@ -926,14 +926,16 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None, typ
             # frontend-injected type metadata get the same answer as the UI.
             received_type = type_resolver.resolve_output_type(o_id, val[1])
             received_types[x] = received_type
-            # DynamicSlot publishes its accepted connection types via the
-            # `slotType` field (auto-derived union of option `when` types).
-            # The declared input_type ("COMFY_DYNAMICSLOT_V3") is just the
-            # dispatch tag; validate against slotType instead.
-            effective_input_type = input_type
+            # DynamicSlot's declared input_type is just the dispatch tag
+            # (COMFY_DYNAMICSLOT_V3); a link is valid iff some Option would
+            # actually claim the resolved upstream type.
             if input_type == _io.DynamicSlot.io_type and isinstance(extra_info, dict):
-                effective_input_type = extra_info.get("slotType", input_type)
-            if 'input_types' not in validate_function_inputs and not validate_node_input(received_type, effective_input_type):
+                link_valid = _io.DynamicSlot._select_option(
+                    extra_info.get("options", []), {x: received_type}, x, has_link=True
+                ) is not None
+            else:
+                link_valid = validate_node_input(received_type, input_type)
+            if 'input_types' not in validate_function_inputs and not link_valid:
                 details = f"{x}, received_type({received_type}) mismatch input_type({input_type})"
                 error = {
                     "type": "return_type_mismatch",
@@ -1079,7 +1081,11 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None, typ
                         continue
 
     if len(validate_function_inputs) > 0 or validate_has_kwargs:
-        input_data_all, _, v3_data = get_input_data(inputs, obj_class, unique_id)
+        # Reuse the precomputed live_input_types so a custom validate_inputs()
+        # sees the same DynamicSlot branch that finalization picked above.
+        input_data_all, _, v3_data = get_input_data(
+            inputs, obj_class, unique_id, live_input_types=live_input_types
+        )
         input_filtered = {}
         for x in input_data_all:
             if x in validate_function_inputs or validate_has_kwargs:

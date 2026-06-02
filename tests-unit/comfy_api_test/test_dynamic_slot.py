@@ -19,32 +19,39 @@ def _opt(when, ids=None):
 def test_option_when_none():
     o = _opt(None, ["a"])
     assert o._when_types is None
+    assert o._when_set is None
     assert o.as_dict()["when"] is None
 
 
 def test_option_when_single_type():
     o = _opt(io.Image)
-    assert o._when_types == frozenset({"IMAGE"})
+    assert o._when_types == ("IMAGE",)
+    assert o._when_set == frozenset({"IMAGE"})
     assert o.as_dict()["when"] == ["IMAGE"]
 
 
 def test_option_when_anytype():
     o = _opt(io.AnyType)
-    assert o._when_types == frozenset({"*"})
+    assert o._when_types == ("*",)
     assert o.as_dict()["when"] == ["*"]
 
 
-def test_option_when_list():
-    o = _opt([io.Image, io.Mask])
-    assert o._when_types == frozenset({"IMAGE", "MASK"})
-    # list form sorted for stable serialization
-    assert o.as_dict()["when"] == ["IMAGE", "MASK"]
+def test_option_when_list_preserves_order():
+    """Declaration order is preserved in both the tuple and the serialized form."""
+    o = _opt([io.Mask, io.Image])
+    assert o._when_types == ("MASK", "IMAGE")
+    assert o.as_dict()["when"] == ["MASK", "IMAGE"]
+
+
+def test_option_when_list_dedups_within_option():
+    o = _opt([io.Image, io.Image, io.Mask])
+    assert o._when_types == ("IMAGE", "MASK")
 
 
 def test_option_when_multitype_input():
     mt = io.MultiType.Input("x", types=[io.Image, io.Latent])
     o = _opt(mt)
-    assert o._when_types == frozenset({"IMAGE", "LATENT"})
+    assert o._when_types == ("IMAGE", "LATENT")
 
 
 def test_option_when_empty_list_rejected():
@@ -83,10 +90,6 @@ def test_input_auto_derives_slot_type():
         _opt(None, ["c"]),
     ])
     # Declared order preserved across non-None options; None contributes nothing.
-    # Note: get_io_type() intentionally still returns the dynamic class io_type
-    # (COMFY_DYNAMICSLOT_V3) so parse_class_inputs dispatches into the expander.
-    # The auto-derived slot type is exposed via the `slotType` field of as_dict()
-    # and via the private `_slot_io_type` attribute (used by the type resolver).
     assert inp._slot_io_type == "IMAGE,MASK"
     d = inp.as_dict()
     assert d["slotType"] == "IMAGE,MASK"
@@ -101,13 +104,45 @@ def test_input_includes_anytype_in_slot_type():
     assert inp._slot_io_type == "IMAGE,*"
 
 
-def test_input_get_all_dedups_inputs_by_id():
+def test_input_rejects_duplicate_type_across_options():
+    with pytest.raises(ValueError, match="appears in more than one"):
+        io.DynamicSlot.Input("x", options=[
+            _opt(io.Image, ["a"]),
+            _opt([io.Image, io.Mask], ["b"]),
+        ])
+
+
+def test_input_rejects_duplicate_anytype_across_options():
+    with pytest.raises(ValueError, match="appears in more than one"):
+        io.DynamicSlot.Input("x", options=[
+            _opt(io.AnyType, ["a"]),
+            _opt(io.AnyType, ["b"]),
+        ])
+
+
+def test_input_rejects_duplicate_when_none():
+    with pytest.raises(ValueError, match="only one Option may declare when=None"):
+        io.DynamicSlot.Input("x", options=[
+            _opt(io.Image, ["a"]),
+            _opt(None, ["b"]),
+            _opt(None, ["c"]),
+        ])
+
+
+def test_input_rejects_non_option_entry():
+    with pytest.raises(ValueError, match="must be DynamicSlot.Option instances"):
+        io.DynamicSlot.Input("x", options=[_opt(io.Image, ["a"]), "not an option"])
+
+
+def test_input_get_all_prepends_self_and_dedups_children():
     inp = io.DynamicSlot.Input("x", options=[
         _opt(io.Image, ["shared", "image_only"]),
         _opt(io.Mask, ["shared", "mask_only"]),
     ])
-    ids = [i.id for i in inp.get_all()]
-    assert ids == ["shared", "image_only", "mask_only"]
+    items = inp.get_all()
+    # Convention shared with Autogrow / DynamicCombo: parent first, then children.
+    assert items[0] is inp
+    assert [i.id for i in items[1:]] == ["shared", "image_only", "mask_only"]
 
 
 # ---------------------------------------------------------------------------
@@ -156,17 +191,29 @@ def test_select_anytype_does_not_match_concrete():
     assert _select(options, {"x": "MASK"}, has_link=True) is None
 
 
-def test_select_first_match_wins():
+def test_select_anytype_branch_does_not_swallow_unenumerated_concrete():
+    """Regression: a slot exposing IMAGE + AnyType must reject LATENT upstream
+    instead of expanding the AnyType branch. validate_inputs relies on this
+    to compute link validity (slotType="IMAGE,*" alone would over-accept)."""
+    options = [_opt(io.Image, ["image_widget"]), _opt(io.AnyType, ["any_widget"])]
+    assert _select(options, {"x": "LATENT"}, has_link=True) is None
+    # Sanity: IMAGE still matches the IMAGE branch and "*" still matches AnyType.
+    assert _select(options, {"x": "IMAGE"}, has_link=True)["when"] == ["IMAGE"]
+    assert _select(options, {"x": "*"}, has_link=True)["when"] == ["*"]
+
+
+def test_select_first_match_wins_on_union_upstream():
+    """Ordering only matters when upstream declares a multi-type union; with
+    per-option type uniqueness, single concrete types can never match two
+    options."""
     options = [
-        _opt([io.Image, io.Mask], ["both"]),
-        _opt(io.Image, ["image_only"]),
+        _opt([io.Image, io.Mask], ["image_or_mask"]),
+        _opt(io.Latent, ["latent_only"]),
     ]
-    # Resolved IMAGE matches both; first option wins.
-    sel = _select(options, {"x": "IMAGE"}, has_link=True)
-    assert sel["inputs"]
-    # The "both" option's first input is named "both"
+    # Upstream union "IMAGE,LATENT" intersects both options; first option wins.
+    sel = _select(options, {"x": "IMAGE,LATENT"}, has_link=True)
     first_input_id = next(iter(sel["inputs"]["required"].keys()))
-    assert first_input_id == "both"
+    assert first_input_id == "image_or_mask"
 
 
 def test_select_multitype_upstream_intersects_option_set():
