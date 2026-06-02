@@ -2172,14 +2172,45 @@ LOADED_MODULE_DIRS = {}
 NODE_STARTUP_ERRORS: dict[str, dict] = {}
 
 
-def _read_pyproject_metadata(module_path: str) -> dict | None:
-    """Best-effort extraction of node-pack identity from pyproject.toml.
+_EMPTY_LEAF_VALUES = (None, "", [], {})
 
-    Returns a dict with the Comfy Registry-style identity (pack_id,
-    display_name, publisher_id, version, repository) when the module
-    directory contains a pyproject.toml. Returns None when no toml is
-    present or parsing fails for any reason — startup-error tracking
-    must never itself raise.
+
+def _prune_empty(value):
+    """Recursively drop empty strings / lists / dicts / None from a nested structure.
+
+    Used to keep the on-wire pyproject payload tight without altering the
+    nesting that callers see (so consumers can still parse it back through
+    ``PyProjectConfig`` if they want a typed object).
+    """
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            cleaned = _prune_empty(v)
+            if cleaned not in _EMPTY_LEAF_VALUES:
+                out[k] = cleaned
+        return out
+    if isinstance(value, list):
+        return [
+            cleaned
+            for cleaned in (_prune_empty(v) for v in value)
+            if cleaned not in _EMPTY_LEAF_VALUES
+        ]
+    return value
+
+
+def _read_pyproject_metadata(module_path: str) -> dict | None:
+    """Best-effort extraction of pyproject.toml for a node module.
+
+    Returns a dict mirroring the ``PyProjectConfig`` shape produced by
+    ``comfy_config.config_parser.extract_node_configuration`` (i.e. with
+    ``project`` and ``tool_comfy`` nesting and the same field names) when the
+    module directory contains a pyproject.toml. Empty / default-valued leaves
+    are pruned so the API payload stays compact, but the nesting is kept
+    intact so API consumers can parse the result back through
+    ``PyProjectConfig`` directly.
+
+    Returns None when no toml is present or parsing fails for any reason —
+    startup-error tracking must never itself raise.
     """
     if not module_path or not os.path.isdir(module_path):
         return None
@@ -2192,15 +2223,8 @@ def _read_pyproject_metadata(module_path: str) -> dict | None:
         cfg = config_parser.extract_node_configuration(module_path)
         if cfg is None:
             return None
-        meta = {
-            "pack_id": cfg.project.name or None,
-            "display_name": cfg.tool_comfy.display_name or None,
-            "publisher_id": cfg.tool_comfy.publisher_id or None,
-            "version": cfg.project.version or None,
-            "repository": cfg.project.urls.repository or None,
-        }
-        # Drop empty fields so the API payload stays compact.
-        return {k: v for k, v in meta.items() if v}
+        pruned = _prune_empty(cfg.model_dump())
+        return pruned or None
     except Exception:
         return None
 
@@ -2222,6 +2246,48 @@ def record_node_startup_error(
     if pyproject:
         entry["pyproject"] = pyproject
     NODE_STARTUP_ERRORS[f"{source}:{module_name}"] = entry
+
+
+def filter_node_startup_errors(
+    *,
+    source: str | None = None,
+    module_name: str | None = None,
+    pack_id: str | None = None,
+) -> dict[str, dict[str, dict]]:
+    """Return `NODE_STARTUP_ERRORS` reshaped for the public HTTP endpoint.
+
+    Entries are grouped by their ``source`` bucket (the same string as the
+    internal ``module_parent`` used at load time). The on-disk
+    ``module_path`` is stripped from each entry — it's an internal detail
+    useful only for server-side logging and would leak absolute filesystem
+    layout otherwise.
+
+    Optional filters narrow the response and combine with AND:
+
+    * ``source``       — only entries from this source bucket.
+    * ``module_name``  — only entries whose module name matches exactly.
+    * ``pack_id``      — only entries whose ``pyproject.project.name``
+                         matches exactly. Entries without a parsed
+                         pyproject.toml can never match this filter.
+
+    A non-matching filter returns an empty dict, not an error — absence of
+    a failure is a valid answer for this query.
+    """
+    grouped: dict[str, dict[str, dict]] = {}
+    for entry in NODE_STARTUP_ERRORS.values():
+        entry_source = entry.get("source", "custom_nodes")
+        if source is not None and entry_source != source:
+            continue
+        if module_name is not None and entry.get("module_name") != module_name:
+            continue
+        if pack_id is not None:
+            pyproject = entry.get("pyproject") or {}
+            project = pyproject.get("project") or {}
+            if project.get("name") != pack_id:
+                continue
+        public_entry = {k: v for k, v in entry.items() if k != "module_path"}
+        grouped.setdefault(entry_source, {})[entry["module_name"]] = public_entry
+    return grouped
 
 
 def get_module_name(module_path: str) -> str:

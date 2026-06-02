@@ -119,11 +119,43 @@ async def test_load_custom_node_attaches_pyproject_metadata(tmp_path):
     entry = nodes.NODE_STARTUP_ERRORS["custom_nodes:MyCoolPack"]
     assert "pyproject" in entry, entry
     py = entry["pyproject"]
-    assert py["pack_id"] == "comfyui-mycoolpack"
-    assert py["display_name"] == "My Cool Pack"
-    assert py["publisher_id"] == "example"
-    assert py["version"] == "1.2.3"
-    assert py["repository"] == "https://github.com/example/comfyui-mycoolpack"
+
+    # Shape must mirror PyProjectConfig 1:1 so consumers can parse it back
+    # through the same pydantic model used by comfy_config.config_parser.
+    project = py["project"]
+    assert project["name"] == "comfyui-mycoolpack"
+    assert project["version"] == "1.2.3"
+    assert project["urls"]["repository"] == "https://github.com/example/comfyui-mycoolpack"
+
+    tool_comfy = py["tool_comfy"]
+    assert tool_comfy["publisher_id"] == "example"
+    assert tool_comfy["display_name"] == "My Cool Pack"
+
+
+def test_prune_empty_drops_empty_leaves_only():
+    src = {
+        "keep_str": "x",
+        "drop_empty_str": "",
+        "drop_none": None,
+        "drop_empty_list": [],
+        "drop_empty_dict": {},
+        "keep_zero": 0,
+        "keep_false": False,
+        "nested": {
+            "drop_me": "",
+            "keep_me": "y",
+            "deeper": {"only_empties": ""},
+        },
+        "list_of_dicts": [{"a": ""}, {"a": "z"}],
+    }
+    result = nodes._prune_empty(src)
+    assert result == {
+        "keep_str": "x",
+        "keep_zero": 0,
+        "keep_false": False,
+        "nested": {"keep_me": "y"},
+        "list_of_dicts": [{"a": "z"}],
+    }
 
 
 @pytest.mark.asyncio
@@ -144,3 +176,78 @@ async def test_load_custom_node_arbitrary_module_parent_passes_through(tmp_path)
     assert await nodes.load_custom_node(module_path, module_parent="future_source") is False
     entry = nodes.NODE_STARTUP_ERRORS["future_source:future_pack"]
     assert entry["source"] == "future_source"
+
+
+# ---------------------------------------------------------------------------
+# Tests for the public reshape/filter helper (nodes.filter_node_startup_errors).
+# The HTTP route is a thin wrapper around this helper, so unit-testing it
+# directly avoids spinning up an aiohttp app while still covering every
+# query-param branch.
+# ---------------------------------------------------------------------------
+
+
+def _seed(*, source, module_name, pack_id=None, module_path="/abs/path"):
+    """Insert a synthetic entry directly into NODE_STARTUP_ERRORS."""
+    entry = {
+        "source": source,
+        "module_name": module_name,
+        "module_path": module_path,
+        "error": "boom",
+        "traceback": "tb",
+        "phase": "import",
+    }
+    if pack_id is not None:
+        entry["pyproject"] = {"project": {"name": pack_id}}
+    nodes.NODE_STARTUP_ERRORS[f"{source}:{module_name}"] = entry
+
+
+def test_filter_node_startup_errors_strips_module_path_and_groups_by_source():
+    _seed(source="custom_nodes", module_name="A", module_path="/x/A")
+    _seed(source="comfy_extras", module_name="B", module_path="/x/B")
+    grouped = nodes.filter_node_startup_errors()
+    assert set(grouped) == {"custom_nodes", "comfy_extras"}
+    assert "module_path" not in grouped["custom_nodes"]["A"]
+    assert "module_path" not in grouped["comfy_extras"]["B"]
+
+
+def test_filter_node_startup_errors_source_filter():
+    _seed(source="custom_nodes", module_name="A")
+    _seed(source="comfy_extras", module_name="B")
+    grouped = nodes.filter_node_startup_errors(source="comfy_extras")
+    assert set(grouped) == {"comfy_extras"}
+    assert set(grouped["comfy_extras"]) == {"B"}
+    # Non-matching source filter returns an empty dict, not an error.
+    assert nodes.filter_node_startup_errors(source="nope") == {}
+
+
+def test_filter_node_startup_errors_module_name_filter():
+    _seed(source="custom_nodes", module_name="A")
+    _seed(source="comfy_extras", module_name="A")  # same name, different source
+    _seed(source="custom_nodes", module_name="C")
+    grouped = nodes.filter_node_startup_errors(module_name="A")
+    # Both A entries (from different sources) survive the filter and stay in
+    # their respective source buckets.
+    assert set(grouped) == {"custom_nodes", "comfy_extras"}
+    assert set(grouped["custom_nodes"]) == {"A"}
+    assert set(grouped["comfy_extras"]) == {"A"}
+
+
+def test_filter_node_startup_errors_pack_id_filter_matches_only_pyproject_entries():
+    _seed(source="custom_nodes", module_name="A", pack_id="comfyui-foo")
+    _seed(source="custom_nodes", module_name="B", pack_id="comfyui-bar")
+    _seed(source="comfy_extras", module_name="C")  # no pyproject at all
+    grouped = nodes.filter_node_startup_errors(pack_id="comfyui-foo")
+    assert set(grouped) == {"custom_nodes"}
+    assert set(grouped["custom_nodes"]) == {"A"}
+    # An entry without a parsed pyproject can never match a pack_id filter.
+    assert nodes.filter_node_startup_errors(pack_id="anything-else") == {}
+
+
+def test_filter_node_startup_errors_filters_combine_with_and():
+    _seed(source="custom_nodes", module_name="A", pack_id="comfyui-foo")
+    _seed(source="comfy_extras", module_name="A", pack_id="comfyui-foo")
+    grouped = nodes.filter_node_startup_errors(
+        source="comfy_extras", pack_id="comfyui-foo"
+    )
+    assert set(grouped) == {"comfy_extras"}
+    assert set(grouped["comfy_extras"]) == {"A"}

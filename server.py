@@ -780,12 +780,26 @@ class PromptServer():
 
             ``module_path`` is stripped because the absolute on-disk path is
             internal detail that the frontend has no use for.
+
+            Optional query parameters narrow the response:
+
+            * ``source``        — only entries from this source bucket.
+            * ``module_name``   — only entries whose module name matches exactly.
+                                  (Folder name for directory-style packs, file
+                                  stem for single-file modules.)
+            * ``pack_id``       — only entries whose ``pyproject.project.name``
+                                  matches exactly. Entries without a parsed
+                                  pyproject.toml are skipped under this filter.
+
+            Filters are combined with AND. Filtering an empty / non-matching
+            result still returns ``{}`` with HTTP 200 rather than 404 — absence
+            of an error is a valid answer for this endpoint.
             """
-            grouped: dict[str, dict[str, dict]] = {}
-            for entry in nodes.NODE_STARTUP_ERRORS.values():
-                source = entry.get("source", "custom_nodes")
-                public_entry = {k: v for k, v in entry.items() if k != "module_path"}
-                grouped.setdefault(source, {})[entry["module_name"]] = public_entry
+            grouped = nodes.filter_node_startup_errors(
+                source=request.query.get("source"),
+                module_name=request.query.get("module_name"),
+                pack_id=request.query.get("pack_id"),
+            )
             return web.json_response(grouped)
 
         @routes.get("/api/jobs")
