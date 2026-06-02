@@ -503,8 +503,25 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
     finalized_outputs = None
     if issubclass(class_def, _ComfyNodeInternal):
         schema = class_def.GET_SCHEMA()
-        if any(isinstance(o, _io.DynamicOutputs.ByKey) for o in schema.outputs):
-            finalized_outputs = _io.get_finalized_class_outputs(schema.outputs, inputs)
+        has_dynamic = any(
+            isinstance(o, (_io.DynamicOutputs.ByKey, _io.DynamicOutputs.FromInput))
+            for o in schema.outputs
+        )
+        if has_dynamic:
+            # live_input_types is only needed for FromInput → DynamicSlot finalization
+            needs_live_types = any(
+                isinstance(o, _io.DynamicOutputs.FromInput)
+                and any(isinstance(i, _io.DynamicSlot.Input) and i.id == o.input_id for i in schema.inputs)
+                for o in schema.outputs
+            )
+            live_input_types = None
+            if needs_live_types and hasattr(dynprompt, "get_type_resolver"):
+                live_input_types = dynprompt.get_type_resolver().compute_live_input_types(unique_id)
+            finalized_outputs = _io.get_finalized_class_outputs(
+                schema.outputs, inputs,
+                schema_inputs=schema.inputs,
+                live_input_types=live_input_types,
+            )
 
     input_data_all = None
     try:

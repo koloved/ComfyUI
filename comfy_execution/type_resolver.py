@@ -145,7 +145,7 @@ class TypeResolver:
         # V3 schemas may declare DynamicOutputs groups whose active slots are
         # determined by prompt inputs and do not appear in class RETURN_TYPES;
         # resolve types against the finalized output list when present.
-        finalized = self._get_finalized_outputs(node, class_def)
+        finalized = self._get_finalized_outputs(node_id, node, class_def)
         if finalized is not None:
             if slot_idx < 0 or slot_idx >= len(finalized):
                 return ANY_TYPE
@@ -232,18 +232,40 @@ class TypeResolver:
                        f"MatchType template '{template_id}' has no bound concrete upstream input; defaulting to AnyType")
         return ANY_TYPE
 
-    def _get_finalized_outputs(self, node: dict | None, class_def) -> io.FinalizedOutputs | None:
-        """Return ``FinalizedOutputs`` for V3 nodes with DynamicOutputs groups, else ``None``."""
+    def _get_finalized_outputs(self, node_id: str, node: dict | None, class_def) -> io.FinalizedOutputs | None:
+        """Return ``FinalizedOutputs`` for V3 nodes with DynamicOutputs groups, else ``None``.
+
+        ``FromInput`` placeholders for ``DynamicSlot`` inputs also need
+        ``live_input_types`` (computed lazily from the resolver itself) so
+        the active option can be picked by resolved upstream type.
+        """
         if not (isinstance(class_def, type) and issubclass(class_def, _ComfyNodeInternal)):
             return None
         try:
             schema = class_def.GET_SCHEMA()
         except Exception:
             return None
-        if not any(isinstance(o, io.DynamicOutputs.ByKey) for o in schema.outputs):
+        has_dynamic = any(
+            isinstance(o, (io.DynamicOutputs.ByKey, io.DynamicOutputs.FromInput))
+            for o in schema.outputs
+        )
+        if not has_dynamic:
             return None
         prompt_inputs = (node or {}).get("inputs", {}) or {}
-        return io.get_finalized_class_outputs(schema.outputs, prompt_inputs)
+        # live_input_types is only needed for FromInput → DynamicSlot; skip the
+        # resolver pass otherwise to keep the hot path cheap.
+        needs_live_types = any(
+            isinstance(o, io.DynamicOutputs.FromInput)
+            and any(isinstance(i, io.DynamicSlot.Input) and i.id == o.input_id for i in schema.inputs)
+            for o in schema.outputs
+        )
+        live_input_types = self.compute_live_input_types(node_id) if needs_live_types else None
+        return io.get_finalized_class_outputs(
+            schema.outputs,
+            prompt_inputs,
+            schema_inputs=schema.inputs,
+            live_input_types=live_input_types,
+        )
 
     def finalized_output_count(self, node_id: str) -> int:
         """Number of active output slots on ``node_id``'s schema for the current prompt.
@@ -256,7 +278,7 @@ class TypeResolver:
         node, class_def = self._get_class_def_for_node(node_id)
         if class_def is None:
             return 0
-        finalized = self._get_finalized_outputs(node, class_def)
+        finalized = self._get_finalized_outputs(node_id, node, class_def)
         if finalized is not None:
             return len(finalized)
         try:
@@ -274,7 +296,7 @@ class TypeResolver:
         result = False
         node, class_def = self._get_class_def_for_node(node_id)
         if class_def is not None:
-            finalized = self._get_finalized_outputs(node, class_def)
+            finalized = self._get_finalized_outputs(node_id, node, class_def)
             if finalized is not None:
                 if 0 <= slot_idx < len(finalized):
                     result = bool(finalized.output_is_list[slot_idx])
