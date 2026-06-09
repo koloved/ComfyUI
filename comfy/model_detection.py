@@ -849,14 +849,14 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["enc_h"] = state_dict['{}encoder.pan_blocks.1.cv4.conv.weight'.format(key_prefix)].shape[0]
         return dit_config
 
-    # Depth Anything 3
-    if '{}backbone.pretrained.patch_embed.proj.weight'.format(key_prefix) in state_dict_keys:
+    # Depth Anything 3 (repackaged to ComfyUI's native Dinov2Model layout via scripts/convert_da3.py)
+    if '{}backbone.embeddings.patch_embeddings.projection.weight'.format(key_prefix) in state_dict_keys:
         dit_config = {}
         dit_config["image_model"] = "DepthAnything3"
 
-        patch_w = state_dict['{}backbone.pretrained.patch_embed.proj.weight'.format(key_prefix)]
+        patch_w = state_dict['{}backbone.embeddings.patch_embeddings.projection.weight'.format(key_prefix)]
         embed_dim = patch_w.shape[0]
-        depth = count_blocks(state_dict_keys, '{}backbone.pretrained.blocks.'.format(key_prefix) + '{}.')
+        depth = count_blocks(state_dict_keys, '{}backbone.encoder.layer.'.format(key_prefix) + '{}.')
 
         # Backbone preset is determined by embed_dim (matches vits/vitb/vitl/vitg).
         backbone_name = {384: "vits", 768: "vitb", 1024: "vitl", 1536: "vitg"}.get(embed_dim)
@@ -865,11 +865,11 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["backbone_name"] = backbone_name
 
         # Detect DA3 extensions on top of vanilla DINOv2.
-        has_camera_token = '{}backbone.pretrained.camera_token'.format(key_prefix) in state_dict_keys
-        # qk-norm shows up as `attn.q_norm.weight` on enabled blocks.
+        has_camera_token = '{}backbone.embeddings.camera_token'.format(key_prefix) in state_dict_keys
+        # qk-norm shows up as `attention.q_norm.weight` on enabled blocks.
         qknorm_indices = [
             i for i in range(depth)
-            if '{}backbone.pretrained.blocks.{}.attn.q_norm.weight'.format(key_prefix, i) in state_dict_keys
+            if '{}backbone.encoder.layer.{}.attention.q_norm.weight'.format(key_prefix, i) in state_dict_keys
         ]
         qknorm_start = qknorm_indices[0] if qknorm_indices else -1
 

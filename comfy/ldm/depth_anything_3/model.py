@@ -11,8 +11,10 @@
 #   auxiliary "ray" head of ``DualDPT`` is enabled the predicted ray map can
 #   alternatively be used to estimate pose via RANSAC (``use_ray_pose=True``).
 #   The 3D-Gaussian head and the nested-architecture wrapper are intentionally
-#   left out of scope here; their state-dict keys are filtered in
-#   ``comfy.supported_models.DepthAnything3.process_unet_state_dict``.
+#   left out of scope here; their state-dict keys (``gs_head.*``,
+#   ``gs_adapter.*``) are dropped when repackaging the checkpoint with
+#   ``scripts/convert_da3.py``, which also remaps the backbone into the native
+#   ``Dinov2Model`` layout that this module loads directly.
 #
 # The backbone is shared with the CLIP-vision DINOv2 path
 # (``comfy.image_encoders.dino2.Dinov2Model``); the DA3-specific extensions
