@@ -16,10 +16,6 @@ components:
                     description: Display name of the asset. Mirrors name for backwards compatibility.
                     nullable: true
                     type: string
-                file_path:
-                    description: "Logical namespace key for the asset. For files under ComfyUI registered model-folder paths, uses models/<folder_name>/<filename>. Not a physical path, not stable across model-folder configuration changes, and not a unique reference key; use id for exact asset identity."
-                    nullable: true
-                    type: string
                 hash:
                     description: Blake3 hash of the asset content. Preferred over asset_hash.
                     pattern: ^blake3:[a-f0-9]{64}$
@@ -150,10 +146,6 @@ components:
                     type: string
                 display_name:
                     description: Display name of the asset. Mirrors name for backwards compatibility.
-                    nullable: true
-                    type: string
-                file_path:
-                    description: "Logical namespace key for the asset. For files under ComfyUI registered model-folder paths, uses models/<folder_name>/<filename>. Not a physical path, not stable across model-folder configuration changes, and not a unique reference key; use id for exact asset identity."
                     nullable: true
                     type: string
                 hash:
